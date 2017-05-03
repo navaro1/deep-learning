@@ -4,59 +4,104 @@ mnist = input_data.read_data_sets(".", one_hot=True, reshape=False)
 import tensorflow as tf
 
 # Parameters
-learning_rate = 0.001
-training_epochs = 20
+learning_rate = 0.00001
+training_epochs = 10
 batch_size = 128
+test_valid_size = 256
 
-n_input = 784 # flat 28*28 image
+droput = 0.75
+
 n_classes = 10 # digits 0-9
 
-n_hidden_layer = 256
-
 weights = {
-    'hidden_layer': tf.Variable(tf.random_normal([n_input, n_hidden_layer])),
-    'out': tf.Variable(tf.random_normal([n_hidden_layer, n_classes]))
+    'wcl1': tf.Variable(tf.random_normal([5, 5, 1, 32])),
+    'wcl2': tf.Variable(tf.random_normal([5, 5, 32, 64])),
+    'wdl1': tf.Variable(tf.random_normal([7*7*64, 1024])),
+    'out': tf.Variable(tf.random_normal([1024, n_classes]))
 }
 
 biases = {
-    'hidden_layer': tf.Variable(tf.random_normal([n_hidden_layer])),
+    'bc1': tf.Variable(tf.random_normal([32])),
+    'bc2': tf.Variable(tf.random_normal([64])),
+    'bd1': tf.Variable(tf.random_normal([1024])),
     'out': tf.Variable(tf.random_normal([n_classes]))
 }
 
+def conv2d(x, W, b, strides=1):
+    x = tf.nn.conv2d(x, W, strides=[1, strides, strides, 1], padding='SAME')
+    x = tf.nn.bias_add(x, b)
+    return tf.nn.relu(x)
+
+def maxpool2d(x, k=2):
+    return tf.nn.max_pool(
+        x,
+        ksize=[1, k, k, 1],
+        strides=[1, k, k, 1],
+        padding='SAME'
+    )
+
+def conv_net(x, weights, biases, dropout):
+    # Layer 1 - 28 * 28 *1 to 14 * 14 * 32
+    conv1 = conv2d(x, weights['wcl1'], biases['bc1'])
+    conv1 = maxpool2d(conv1, k=2)
+
+    # Layer 2 - 14 * 14 * 32 to 7 * 7 * 64
+    conv2 = conv2d(conv1, weights['wcl2'], biases['bc2'])
+    conv2 = maxpool2d(conv2, k=2)
+
+    # Fully connected layer - 7*7*64 to 1024
+    fc1 = tf.reshape(conv2, [-1, weights['wdl1'].get_shape().as_list()[0]])
+    fc1 = tf.add(tf.matmul(fc1, weights['wdl1']), biases['bd1'])
+    fc1 = tf.nn.relu(fc1)
+    fc1 = tf.nn.dropout(fc1, dropout)
+
+    # Output Layer - class prediction - 1024 to 10
+    out = tf.add(tf.matmul(fc1, weights['out']), biases['out'])
+    return out
+
 # tf Graph input
-x = tf.placeholder("float", [None, 28, 28, 1])
-y = tf.placeholder("float", [None, n_classes])
+x = tf.placeholder(tf.float32, [None, 28, 28, 1])
+y = tf.placeholder(tf.float32, [None, n_classes])
+keep_prob = tf.placeholder(tf.float32)
 
-x_flat = tf.reshape(x, [-1, n_input])
-
-# model
-layer_1 = tf.add(tf.matmul(x_flat, weights['hidden_layer']), biases['hidden_layer'])
-layer_1 = tf.nn.relu(layer_1)
-
-logits = tf.add(tf.matmul(layer_1, weights['out']), biases['out'])
+# Model
+logits = conv_net(x, weights, biases, keep_prob)
 
 # Define loss and optimizer
 cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=y))
 optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate).minimize(cost)
 
+# Accuracy
+correct_pred = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+
 # Initialize the variables
 init = tf.global_variables_initializer()
 
+saver = tf.train.Saver()
+
+# Launch the graph
 with tf.Session() as session:
     session.run(init)
+
     # Training cycle
     for epoch in range(training_epochs):
-        total_batch = int(mnist.train.num_examples/batch_size)
+        total_batch = mnist.train.num_examples//batch_size
         # Loop over all batches
         for i in range(total_batch):
             batch_x, batch_y = mnist.train.next_batch(batch_size)
-            session.run(optimizer, feed_dict={x: batch_x, y: batch_y})
-        c = session.run(cost, feed_dict={x: batch_x, y: batch_y})
-        print("Epoch:", '%04d' % (epoch+1), "cost=", "{:.9f}".format(c))
+            session.run(optimizer, feed_dict={x: batch_x, y: batch_y, keep_prob: droput})
 
-        # Test model
-    correct_prediction = tf.equal(tf.argmax(logits, 1), tf.argmax(y, 1))
-    accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
-    test_size = 256
-    print("Accuracy:", accuracy.eval({x: mnist.test.images[:test_size], y: mnist.test.labels[:test_size]}))
+        # Calculate bastch loss and accuracy
+        loss = session.run(cost, feed_dict={x: batch_x, y: batch_y, keep_prob: 1.})
+        valid_acc = session.run(accuracy, feed_dict={x: mnist.validation.images[:test_valid_size], y: mnist.validation.labels[:test_valid_size], keep_prob: 1.})
+        print('Epoch {:>2} - Loss: {:>10.4f}, Validation Accuracy: {:.6f}'.format(epoch + 1, loss, valid_acc))
 
+    # Test model
+    print(
+        "Accuracy:",
+        session.run(accuracy, feed_dict={x: mnist.test.images[:test_valid_size], y: mnist.test.labels[:test_valid_size], keep_prob: 1.})
+    )
+
+    saver.save(session, "./trained_model.ckpt")
+    print("Trained model saved.")
